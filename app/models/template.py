@@ -91,6 +91,12 @@ class Template:
     def layout(self) -> str:
         if utils.urls.schema(self.source):
             return ""
+        # Don't use source as layout if it's a category name like "reaction" or "custom"
+        # These cause style issues like "default.reaction" or "default.custom"
+        source = (self.source or "").strip().lower()
+        if source in {"reaction", "custom", "general", ""}:
+            return ""
+        # Return original source (not lowercased) if it's a valid layout
         return self.source or ""
 
     @layout.setter
@@ -113,7 +119,11 @@ class Template:
             animated = True
 
         style = style or "default"
-        style += "." + self.layout
+        # Only append layout if it's not empty and not a URL (to avoid "default.reaction" or "default.custom")
+        layout = self.layout
+        # Double-check: don't append if layout is a category name (case-insensitive)
+        if layout and layout.lower() not in {"", "default", "reaction", "custom", "general"} and not utils.urls.schema(layout):
+            style += "." + layout
         style = style.strip(".")
 
         level = 20 if (style != "default" or animated is True) else 10

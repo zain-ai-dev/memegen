@@ -6,6 +6,7 @@ from PIL import UnidentifiedImageError
 from sanic import Request, Sanic
 from sanic.exceptions import MethodNotSupported, NotFound
 from sanic.handlers import ErrorHandler
+from sanic.log import logger
 
 from . import settings, utils, views
 
@@ -60,6 +61,18 @@ def init(app: Sanic):
     app.blueprint(views.images.blueprint)
     app.blueprint(views.templates.blueprint)
     app.blueprint(views.shortcuts.blueprint)
+    
+    # Initialize custom meme templates on startup (non-blocking)
+    @app.after_server_start
+    async def init_custom_templates(app, loop):
+        try:
+            from ..ai.custom_templates import ensure_custom_templates_initialized
+            import asyncio
+            # Run in thread pool to not block
+            await asyncio.to_thread(ensure_custom_templates_initialized)
+            logger.info("Custom meme templates initialized successfully")
+        except Exception as e:
+            logger.warning(f"Could not initialize custom templates: {e}")
 
     app.config.MOTD = False
     app.ext._display = lambda: None  # type: ignore

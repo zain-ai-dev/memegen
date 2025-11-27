@@ -1,4 +1,5 @@
 from sanic import Request
+from sanic.log import logger
 
 from . import settings, utils
 from .models import Template
@@ -16,7 +17,23 @@ def get_valid_templates(
         templates = [t for t in templates if "animated" in t.styles]
     elif animated is False:
         templates = [t for t in templates if "animated" not in t.styles]
-    return [template.jsonify(request) for template in templates]
+    
+    # Filter out templates with invalid IDs (those ending with dashes or not matching slug pattern)
+    import re
+    slug_pattern = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
+    valid_templates = []
+    for template in templates:
+        if slug_pattern.match(template.id):
+            try:
+                valid_templates.append(template.jsonify(request))
+            except Exception as e:
+                # Skip templates that cause errors (e.g., invalid template_id for URL building)
+                logger.warning(f"Skipping template {template.id} due to error: {e}")
+                continue
+        else:
+            logger.warning(f"Skipping template with invalid ID (doesn't match slug pattern): {template.id}")
+    
+    return valid_templates
 
 
 def get_example_images(

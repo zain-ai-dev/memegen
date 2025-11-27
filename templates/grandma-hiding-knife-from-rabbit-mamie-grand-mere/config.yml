@@ -1,0 +1,44 @@
+name: Grandma Hiding Knife From Rabbit Mamie Grand Mere Couteau Lapin
+source: ''
+keywords:
+  - grandma
+  - hiding
+  - knife
+  - from
+  - rabbit
+  - mamie
+  - grand
+  - mere
+  - couteau
+  - lapin
+text:
+  - style: upper
+    color: white
+    font: thick
+    anchor_x: 0.0
+    anchor_y: 0.0
+    angle: 0.0
+    scale_x: 1.0
+    scale_y: 0.2
+    align: center
+    start: 0.0
+    stop: 1.0
+  - style: upper
+    color: white
+    font: thick
+    anchor_x: 0.0
+    anchor_y: 0.8
+    angle: 0.0
+    scale_x: 1.0
+    scale_y: 0.2
+    align: center
+    start: 0.0
+    stop: 1.0
+example:
+  - Top Text
+  - Bottom Text
+overlay:
+  - center_x: 0.5
+    center_y: 0.5
+    angle: 0.0
+    scale: 0.25
