@@ -26,6 +26,12 @@ try:
 except NameError:
     _LAST_EXTENSION = None  # type: ignore[assignment]
 
+# Query-based template tracking for variety
+# Maps normalized query -> list of recently used template IDs
+_QUERY_TEMPLATE_HISTORY: dict[str, list[str]] = {}
+_MAX_HISTORY_PER_QUERY = 10  # Track last 10 templates per query
+_MAX_HISTORY_SIZE = 1000  # Maximum number of queries to track
+
 
 async def _call_gemini(prompt: str, max_retries: int = 3) -> dict | None:
     """Call the Google Gemini API to interpret a meme request with retry logic.
@@ -115,6 +121,46 @@ async def _call_gemini(prompt: str, max_retries: int = 3) -> dict | None:
                 return None
     
     return None
+
+
+def _normalize_query(query: str) -> str:
+    """Normalize query for tracking purposes (remove case, extra spaces, etc.)."""
+    import re
+    # Normalize: lowercase, remove extra spaces, remove punctuation variations
+    normalized = re.sub(r'[^\w\s]', ' ', query.lower())
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized
+
+
+def _get_used_templates_for_query(query: str) -> list[str]:
+    """Get list of templates recently used for this query."""
+    normalized = _normalize_query(query)
+    return _QUERY_TEMPLATE_HISTORY.get(normalized, [])
+
+
+def _record_template_for_query(query: str, template_id: str):
+    """Record that a template was used for a query."""
+    normalized = _normalize_query(query)
+    
+    # Clean up old entries if cache is too large
+    if len(_QUERY_TEMPLATE_HISTORY) > _MAX_HISTORY_SIZE:
+        # Remove oldest entries (simple FIFO - remove first 20%)
+        keys_to_remove = list(_QUERY_TEMPLATE_HISTORY.keys())[:_MAX_HISTORY_SIZE // 5]
+        for key in keys_to_remove:
+            del _QUERY_TEMPLATE_HISTORY[key]
+    
+    if normalized not in _QUERY_TEMPLATE_HISTORY:
+        _QUERY_TEMPLATE_HISTORY[normalized] = []
+    
+    history = _QUERY_TEMPLATE_HISTORY[normalized]
+    
+    # Add to history if not already there (avoid duplicates)
+    if template_id not in history:
+        history.append(template_id)
+    
+    # Keep only last N templates
+    if len(history) > _MAX_HISTORY_PER_QUERY:
+        history.pop(0)
 
 
 def _build_prompt(query: str) -> str:
@@ -250,11 +296,20 @@ def _build_prompt(query: str) -> str:
     except Exception as e:
         logger.warning(f"Could not get custom template info: {e}")
 
+    # Get recently used templates for this query to avoid repetition
+    used_templates = _get_used_templates_for_query(query)
+    used_templates_info = ""
+    if used_templates:
+        used_templates_info = f"\n\n⚠️ IMPORTANT: Recently used templates for similar requests (AVOID THESE for variety): {', '.join(used_templates[:5])}"
+        if len(used_templates) > 5:
+            used_templates_info += f" (and {len(used_templates) - 5} more)"
+        used_templates_info += "\n- Choose a DIFFERENT template from the available list to ensure variety"
+    
     # Note: double braces {{ }} below escape literal JSON braces in an f-string
     prompt = f"""
 You are an expert HUMOR meme generator specializing in creating funny, entertaining memes that make people laugh.
 You have access to these real templates: {', '.join(templates[:150])}{'...' if len(templates) > 150 else ''}
-{custom_template_info}
+{custom_template_info}{used_templates_info}
 Available fonts: {', '.join(fonts)}.
 File types: {', '.join(extensions)}.
 
@@ -267,6 +322,9 @@ CRITICAL RULES - ALWAYS FOLLOW THESE:
    - Transform any request into a humorous meme, even if the original topic is serious
    - Use clever wordplay, irony, exaggeration, or absurdity to add humor
    - If user gives a serious topic, find the funny angle and make it hilarious
+   - ABSOLUTELY NO abusive, offensive, sexual, or inappropriate content
+   - Keep humor clean, family-friendly, and suitable for all audiences
+   - Focus on relatable, clever, and lighthearted humor
 
 2. HANDLE ALL KINDS OF REQUESTS:
    - Complete meme descriptions: "create a meme about X" → Generate full funny meme
@@ -304,15 +362,19 @@ CRITICAL RULES - ALWAYS FOLLOW THESE:
 6. FILE FORMAT VARIETY - ALWAYS USE DIFFERENT FORMATS:
    - NEVER default to "png" - rotate through all formats: png, jpg, gif, webp
    - If user doesn't specify format, pick randomly from: png, jpg, gif, webp
-   - For similar requests, use different formats each time
+   - For similar requests, use DIFFERENT formats each time
    - Prefer variety: if last meme was png, use jpg or gif this time
    - Only use user-specified format if explicitly requested
+   - Use hash-based selection to ensure different formats for same query
 
-7. TEMPLATE VARIETY - AVOID REPETITION:
-   - Don't use the same template for similar requests
+7. TEMPLATE VARIETY - CRITICAL FOR USER EXPERIENCE:
+   - If templates are listed above as "recently used", AVOID THEM - choose a different one
+   - Don't use the same template for similar requests - users want variety
    - Explore different templates that fit the scenario
    - Use the scenario-matched templates shown above for best results
    - Try different templates even for similar humor concepts
+   - If user sends the same request multiple times, they want DIFFERENT templates each time
+   - Prioritize templates that haven't been used recently for this query
 
 ═══════════════════════════════════════════════════════════════════════════════
 TEMPLATE MATCHING STRATEGY (CRITICAL - FOLLOW IN ORDER):
@@ -361,26 +423,39 @@ Return ONLY valid JSON (no markdown, no code blocks, no extra text):
 
 REQUIREMENTS:
 - template_id: MUST be an exact match from the template list above (check scenario-matched templates first)
+  * AVOID templates listed in "recently used" section above - choose a different one for variety
 - text: MUST be an array with 2 elements (top and bottom) - both MUST be funny/humorous/entertaining
+  * Text MUST be clean, family-friendly, and appropriate for all audiences
+  * NO abusive, offensive, sexual, or inappropriate content
+  * Focus on clever wordplay, relatable situations, and lighthearted humor
 - font: Must match a font from the list above (or omit if not specified)
 - extension: Must be one of: png, jpg, gif, webp (rotate for variety, don't default to png)
+  * Use different format than might have been used before for similar queries
 - style: Usually "default" unless user requests "animated" or template has specific styles
 
 CRITICAL: 
 - The "text" array MUST contain funny, humorous, entertaining content that makes people laugh
 - The template_id MUST exist in the template lists above
 - Always prioritize humor and entertainment value
+- ABSOLUTELY NO abusive, sexual, or offensive content - keep it clean and funny
+- If user's request could be interpreted inappropriately, find the clean, funny angle instead
 
 ═══════════════════════════════════════════════════════════════════════════════
 USER REQUEST: {query}
 ═══════════════════════════════════════════════════════════════════════════════
 
 Analyze the request carefully:
-1. Identify if user specified a template name → use it exactly
+1. Identify if user specified a template name → use it exactly (unless it was recently used for this query)
 2. Identify the scenario/emotion → use scenario-matched templates from above
-3. Generate FUNNY, HUMOROUS text that makes the meme entertaining
-4. Choose the BEST matching template from the lists above
+3. Generate FUNNY, HUMOROUS, CLEAN text that makes the meme entertaining (NO abuse/sexual content)
+4. Choose the BEST matching template from the lists above (AVOID recently used templates for variety)
 5. Complete any partial input into a full humorous meme
+6. Select a different file format than might have been used before (rotate: png, jpg, gif, webp)
+
+IMPORTANT: 
+- If this is a repeat request, choose a DIFFERENT template and format than before
+- Keep all content clean, family-friendly, and appropriate
+- Make it genuinely funny and entertaining
 
 Return ONLY the JSON object, nothing else.
 """
@@ -392,6 +467,7 @@ async def interpret_and_build_url(request, query: str) -> dict | None:
 
     Always generate a meme if at all possible, using the closest valid template if directly requested one isn't available.
     Retries Gemini API calls on rate limits to ensure we always get a Gemini-generated meme.
+    Ensures template and format variety for repeated queries.
     """
     # Declare global variables at the start of the function
     global _LAST_TEMPLATE_ID, _LAST_EXTENSION
@@ -527,13 +603,16 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
         # Smart template matching: try to find best match based on query context
         logger.warning(f"Gemini returned template '{template_id}' not in allowed templates, finding best match")
         
+        # Get recently used templates for this query to avoid repetition
+        used_templates_for_query = _get_used_templates_for_query(query)
+        
         # First, try to find scenario-matched templates from custom templates
         best_match = None
         try:
             custom_templates_data = scan_custom_templates()
             query_words = set(query_lower.split())
             
-            # Score templates by relevance to query
+            # Score templates by relevance to query, penalizing recently used ones
             scored_templates = []
             for tid, info in custom_templates_data.items():
                 if tid not in allowed_templates:
@@ -541,6 +620,10 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
                 score = 0
                 template_name = info.get("name", tid).lower()
                 template_tags = [t.lower() for t in info.get("tags", [])]
+                
+                # Penalize recently used templates for this query
+                if tid in used_templates_for_query:
+                    score -= 20  # Strong penalty for recently used
                 
                 # Check for exact template_id match (partial)
                 if template_id.lower() in tid.lower() or tid.lower() in template_id.lower():
@@ -561,21 +644,35 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
             
             if scored_templates:
                 scored_templates.sort(key=lambda x: x[0], reverse=True)
-                best_match = scored_templates[0][1]
-                logger.info(f"Found scenario-matched template: {best_match} (score: {scored_templates[0][0]})")
+                # Prefer templates that haven't been used recently
+                for score, tid in scored_templates:
+                    if tid not in used_templates_for_query:
+                        best_match = tid
+                        logger.info(f"Found scenario-matched template (unused): {best_match} (score: {score})")
+                        break
+                if not best_match:
+                    best_match = scored_templates[0][1]
+                    logger.info(f"Found scenario-matched template (all used, using best): {best_match} (score: {scored_templates[0][0]})")
         except Exception as e:
             logger.warning(f"Error in scenario matching: {e}")
         
         # If no scenario match, try string similarity
         if not best_match:
             import difflib
-            matches = difflib.get_close_matches(template_id, allowed_templates, n=5, cutoff=0.3)
+            matches = difflib.get_close_matches(template_id, allowed_templates, n=10, cutoff=0.3)
             if matches:
-                # Prefer matches that haven't been used recently
+                # Prefer matches that haven't been used recently for this query or globally
                 for match in matches:
-                    if match != _LAST_TEMPLATE_ID:
+                    if match != _LAST_TEMPLATE_ID and match not in used_templates_for_query:
                         best_match = match
                         break
+                # If all matches were used, try to find one not in recent history
+                if not best_match:
+                    for match in matches:
+                        if match not in used_templates_for_query:
+                            best_match = match
+                            break
+                # Last resort: use best match even if used
                 if not best_match:
                     best_match = matches[0]
         
@@ -594,7 +691,7 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
             return None
 
     # Helper to choose a valid extension when not specified, varying based on context
-    def _choose_extension(meme_template_id: str = None, meme_text: list = None, prefer_animated: bool = False, user_requested: str = None) -> str:
+    def _choose_extension(meme_template_id: str = None, meme_text: list = None, prefer_animated: bool = False, user_requested: str = None, query: str = None) -> str:
         """Choose extension with maximum variety - never default to png unless user requests it."""
         # If user explicitly requested a format, use it
         if user_requested and user_requested.lower() in settings.ALLOWED_EXTENSIONS:
@@ -611,8 +708,12 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
         else:
             variety_population = population
         
-        # Use context-based selection for variety
-        if meme_template_id and meme_text:
+        # Use context-based selection for variety, including query for same-query variety
+        if query:
+            # Include query in hash to get different formats for same query
+            context_str = _normalize_query(query) + str(meme_template_id or "") + "".join(meme_text[:2] if meme_text else [])
+            context_hash = abs(hash(context_str))
+        elif meme_template_id and meme_text:
             context_str = str(meme_template_id) + "".join(meme_text[:2] if meme_text else [])
             context_hash = abs(hash(context_str))
         else:
@@ -640,7 +741,7 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
         # Treat as custom background
         template = models.Template.objects.get_or_create(image_url)
         if not extension:
-            extension = _choose_extension(template_id, text, style == "animated", user_requested_format)
+            extension = _choose_extension(template_id, text, style == "animated", user_requested_format, query)
         url = template.build_custom_url(request, text, background=image_url, style=style, font=font, extension=extension)
     elif template_id:
         template = models.Template.objects.get_or_create(template_id)
@@ -651,25 +752,49 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
             styles = []
         if style and style not in {"default", "animated"} and style not in styles:
             style = "default"
-        # Avoid reusing the same template consecutively (unless user specifically requested it)
+        # Avoid reusing the same template for this query (unless user specifically requested it)
+        used_templates_for_query = _get_used_templates_for_query(query)
         if (not user_requested_template and 
-            _LAST_TEMPLATE_ID and 
-            template_id == _LAST_TEMPLATE_ID and 
+            template_id in used_templates_for_query and 
             allowed_templates):
-            alts = [t for t in allowed_templates if t != template_id]
+            # Find alternatives that haven't been used for this query
+            alts = [t for t in allowed_templates if t != template_id and t not in used_templates_for_query]
+            if not alts:
+                # If all templates were used, try to find ones not used recently
+                alts = [t for t in allowed_templates if t != template_id]
+            
             if alts:
                 # Prefer templates that match the scenario better
                 import difflib
                 # Try to find similar templates that might work better
-                similar = difflib.get_close_matches(original_template or template_id, alts, n=3)
+                similar = difflib.get_close_matches(original_template or template_id, alts, n=5)
                 if similar:
-                    template_id = similar[0]
+                    # Prefer ones not in used history
+                    for alt in similar:
+                        if alt not in used_templates_for_query:
+                            template_id = alt
+                            break
+                    if template_id == (original_template or template_id):
+                        template_id = similar[0]
                 else:
+                    # Random selection from alternatives
                     template_id = random.choice(alts)
                 template = models.Template.objects.get_or_create(template_id)
-                logger.info(f"Switched to different template for variety: {template_id}")
+                logger.info(f"Switched to different template for query variety: {template_id} (was in history: {used_templates_for_query[:3]})")
+        # Also avoid global repetition
+        elif (not user_requested_template and 
+              _LAST_TEMPLATE_ID and 
+              template_id == _LAST_TEMPLATE_ID and 
+              allowed_templates):
+            alts = [t for t in allowed_templates if t != template_id and t not in used_templates_for_query]
+            if not alts:
+                alts = [t for t in allowed_templates if t != template_id]
+            if alts:
+                template_id = random.choice(alts)
+                template = models.Template.objects.get_or_create(template_id)
+                logger.info(f"Switched to different template for global variety: {template_id}")
         if not extension:
-            extension = _choose_extension(template_id, text, style == "animated", user_requested_format)
+            extension = _choose_extension(template_id, text, style == "animated", user_requested_format, query)
         url = template.build_custom_url(request, text, style=style, font=font, extension=extension)
         if not template.valid:
             # Try fallback template, if not already tried
@@ -680,7 +805,7 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
                 template_id = fallback[0]
                 template = models.Template.objects.get_or_create(template_id)
                 if not extension:
-                    extension = _choose_extension(template_id, text, style == "animated", user_requested_format)
+                    extension = _choose_extension(template_id, text, style == "animated", user_requested_format, query)
                 url = template.build_custom_url(request, text, style=style, font=font, extension=extension)
                 used_fallback = True
             elif valid_templates:
@@ -689,7 +814,7 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
                 template_id = random.choice(alts) if alts else valid_templates[0]
                 template = models.Template.objects.get_or_create(template_id)
                 if not extension:
-                    extension = _choose_extension(template_id, text, style == "animated", user_requested_format)
+                    extension = _choose_extension(template_id, text, style == "animated", user_requested_format, query)
                 url = template.build_custom_url(request, text, style=style, font=font, extension=extension)
                 used_fallback = True
             else:
@@ -700,6 +825,12 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
 
     url, _updated = await utils.meta.tokenize(request, url)
     _LAST_TEMPLATE_ID = template_id or _LAST_TEMPLATE_ID
+    
+    # Record template usage for this query to ensure variety on repeat requests
+    if template_id:
+        _record_template_for_query(query, template_id)
+        logger.info(f"Recorded template '{template_id}' for query (history now: {_get_used_templates_for_query(query)[-3:]})")
+    
     if used_fallback:
         logger.warning(f"Gemini requested invalid template '{original_template}', using fallback '{template_id}' instead.")
     return {"url": url, "generator": "gemini", "confidence": float(data.get("confidence", 0.75))}
