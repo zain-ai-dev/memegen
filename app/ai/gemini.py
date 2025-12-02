@@ -583,28 +583,65 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
     original_template = template_id
     
     # Check if user explicitly requested a template name in the query
+    # Only match if it's an explicit request (with keywords) or a whole word match (not substring)
     user_requested_template = None
     query_lower = query.lower()
-    for t in allowed_templates:
-        # Check for exact template name match in query
-        if (t.lower() in query_lower or 
-            f"template {t}" in query_lower or 
-            f"use {t}" in query_lower or
-            f"{t} template" in query_lower or
-            f"{t} meme" in query_lower):
-            user_requested_template = t
-            break
+    import re
     
-    # If user requested a specific template, prioritize it
+    for t in allowed_templates:
+        t_lower = t.lower()
+        # Skip very short template names (1-2 chars) to avoid false matches like "ll" in "all"
+        if len(t) <= 2:
+            # Only match if explicitly requested with keywords
+            if (f"template {t}" in query_lower or 
+                f"use {t}" in query_lower or
+                f"{t} template" in query_lower or
+                f"{t} meme" in query_lower):
+                user_requested_template = t
+                break
+        else:
+            # For longer templates, check for whole word match or explicit request
+            # Use word boundaries to avoid substring matches
+            word_boundary_pattern = r'\b' + re.escape(t_lower) + r'\b'
+            if (re.search(word_boundary_pattern, query_lower) or
+                f"template {t}" in query_lower or 
+                f"use {t}" in query_lower or
+                f"{t} template" in query_lower or
+                f"{t} meme" in query_lower):
+                user_requested_template = t
+                break
+    
+    # Get recently used templates for this query
+    used_templates_for_query = _get_used_templates_for_query(query)
+    
+    # If user requested a specific template, check if it's been used recently
+    # If it has been used, prefer a different template for variety
     if user_requested_template and user_requested_template in allowed_templates:
+        if user_requested_template in used_templates_for_query:
+            # Template was requested but used recently - find alternative
+            logger.info(f"User requested template '{user_requested_template}' but it was recently used, finding alternative for variety")
+            # Find similar templates that haven't been used
+            import difflib
+            alts = [t for t in allowed_templates if t != user_requested_template and t not in used_templates_for_query]
+            if alts:
+                # Try to find similar templates
+                similar = difflib.get_close_matches(user_requested_template, alts, n=3, cutoff=0.5)
+                if similar:
+                    user_requested_template = similar[0]
+                    logger.info(f"Using similar alternative template: {user_requested_template}")
+                else:
+                    # Use a random alternative
+                    user_requested_template = random.choice(alts)
+                    logger.info(f"Using random alternative template: {user_requested_template}")
+            else:
+                # All alternatives used, but user explicitly requested it, so use it
+                logger.info(f"All alternatives used, honoring explicit request for: {user_requested_template}")
+        
         template_id = user_requested_template
         logger.info(f"User requested template: {user_requested_template}")
     elif template_id and (template_id not in allowed_templates):
         # Smart template matching: try to find best match based on query context
         logger.warning(f"Gemini returned template '{template_id}' not in allowed templates, finding best match")
-        
-        # Get recently used templates for this query to avoid repetition
-        used_templates_for_query = _get_used_templates_for_query(query)
         
         # First, try to find scenario-matched templates from custom templates
         best_match = None
@@ -752,35 +789,40 @@ CRITICAL: Make it HILARIOUS and use a template from the list above."""
             styles = []
         if style and style not in {"default", "animated"} and style not in styles:
             style = "default"
-        # Avoid reusing the same template for this query (unless user specifically requested it)
+        # Avoid reusing the same template for this query
+        # Always check history and switch if template was used recently (unless explicitly requested with keywords)
         used_templates_for_query = _get_used_templates_for_query(query)
-        if (not user_requested_template and 
-            template_id in used_templates_for_query and 
+        if (template_id in used_templates_for_query and 
             allowed_templates):
-            # Find alternatives that haven't been used for this query
-            alts = [t for t in allowed_templates if t != template_id and t not in used_templates_for_query]
-            if not alts:
-                # If all templates were used, try to find ones not used recently
-                alts = [t for t in allowed_templates if t != template_id]
-            
-            if alts:
-                # Prefer templates that match the scenario better
-                import difflib
-                # Try to find similar templates that might work better
-                similar = difflib.get_close_matches(original_template or template_id, alts, n=5)
-                if similar:
-                    # Prefer ones not in used history
-                    for alt in similar:
-                        if alt not in used_templates_for_query:
-                            template_id = alt
-                            break
-                    if template_id == (original_template or template_id):
-                        template_id = similar[0]
-                else:
-                    # Random selection from alternatives
-                    template_id = random.choice(alts)
-                template = models.Template.objects.get_or_create(template_id)
-                logger.info(f"Switched to different template for query variety: {template_id} (was in history: {used_templates_for_query[:3]})")
+            # If user explicitly requested with keywords (handled above), we already checked
+            # Otherwise, find alternative for variety
+            if not user_requested_template or template_id != user_requested_template:
+                # Template was used recently - find alternative for variety
+                logger.info(f"Template '{template_id}' was used recently for this query, finding alternative for variety")
+                # Find alternatives that haven't been used for this query
+                alts = [t for t in allowed_templates if t != template_id and t not in used_templates_for_query]
+                if not alts:
+                    # If all templates were used, try to find ones not used recently
+                    alts = [t for t in allowed_templates if t != template_id]
+                
+                if alts:
+                    # Prefer templates that match the scenario better
+                    import difflib
+                    # Try to find similar templates that might work better
+                    similar = difflib.get_close_matches(original_template or template_id, alts, n=5)
+                    if similar:
+                        # Prefer ones not in used history
+                        for alt in similar:
+                            if alt not in used_templates_for_query:
+                                template_id = alt
+                                break
+                        if template_id == (original_template or template_id):
+                            template_id = similar[0]
+                    else:
+                        # Random selection from alternatives
+                        template_id = random.choice(alts)
+                    template = models.Template.objects.get_or_create(template_id)
+                    logger.info(f"Switched to different template for query variety: {template_id} (was in history: {used_templates_for_query[:3]})")
         # Also avoid global repetition
         elif (not user_requested_template and 
               _LAST_TEMPLATE_ID and 

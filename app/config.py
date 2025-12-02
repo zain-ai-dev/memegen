@@ -66,7 +66,11 @@ def init(app: Sanic):
     @app.after_server_start
     async def init_custom_templates(app, loop):
         try:
-            from ..ai.custom_templates import ensure_custom_templates_initialized
+            # Try relative import first, then absolute
+            try:
+                from .ai.custom_templates import ensure_custom_templates_initialized
+            except (ImportError, ValueError):
+                from app.ai.custom_templates import ensure_custom_templates_initialized
             import asyncio
             # Run in thread pool to not block
             await asyncio.to_thread(ensure_custom_templates_initialized)
